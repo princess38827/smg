@@ -232,10 +232,6 @@ impl WorkerSelectionStage {
     /// EPD re-selects only the prefill/decode pair — the first dispatch
     /// already launched the encode jobs, and the plan carries their
     /// bootstrap rooms.
-    #[expect(
-        clippy::result_large_err,
-        reason = "Response is the standard error type in the pipeline stage pattern"
-    )]
     pub(crate) fn reselect(&self, ctx: &mut DispatchContext) -> Result<(), Response> {
         let text = ctx.routing.routing_text.as_deref();
         let tokens = if ctx.routing.token_ids.is_empty() {
