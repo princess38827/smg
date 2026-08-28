@@ -3,6 +3,7 @@
 //! view of publisher streams (no consensus — see the design doc's
 //! epoch/commutativity argument).
 
+pub mod bridge;
 pub mod engine;
 pub mod server;
 

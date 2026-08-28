@@ -36,6 +36,8 @@ rustc-hash = "2"
 
 [dev-dependencies]
 rand = { workspace = true }
+mock-worker = { path = "../mock_worker" }
+portpicker = "0.1"
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"

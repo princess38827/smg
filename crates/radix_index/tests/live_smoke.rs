@@ -1,0 +1,162 @@
+//! Live end-to-end smoke: a real mock gRPC sim worker -> bridge ->
+//! index service (over the wire) -> Subscribe query. Verifies the whole
+//! event path: worker KV events, hash-only conversion, publish, apply,
+//! and overlap scoring, with the query hashed exactly the way a gateway
+//! would hash a request.
+
+use std::{sync::Arc, time::Duration};
+
+use futures::StreamExt;
+use kv_index::compute_request_content_hashes;
+use radix_index::{
+    bridge, proto, proto::radix_index_client::RadixIndexClient, server, Engine, EngineConfig,
+};
+use smg_grpc_client::tokenspeed_scheduler::{tokenspeed_proto as ts, TokenSpeedSchedulerClient};
+use tokio::sync::mpsc;
+
+const MODEL: &str = "smoke-model";
+const BLOCK: u32 = 4;
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixture: fire-and-forget servers for the test's lifetime"
+)]
+#[tokio::test]
+async fn worker_events_reach_the_index_over_the_wire() {
+    // 1. Mock gRPC sim worker with KV events (block size 4).
+    let worker_port = portpicker::pick_unused_port().expect("port for worker");
+    let cfg = Arc::new(mock_worker::config::Config {
+        host: "127.0.0.1".to_string(),
+        http_base_port: 0,
+        http_count: 0,
+        grpc_base_port: worker_port,
+        grpc_count: 1,
+        zmq_handshake: None,
+        zmq_count: 0,
+        zmq_start_index: 0,
+        model_id: MODEL.to_string(),
+        tokenizer_path: MODEL.to_string(),
+        gen_delay: Duration::ZERO,
+        output_tokens: 4,
+        realistic: false,
+        engine: mock_worker::engine::EngineParams::default(),
+        sim: true,
+        sim_params: mock_worker::sim::SimParams {
+            block_size: BLOCK as usize,
+            itl_ms: 1.0,
+            ttft_base_ms: 1.0,
+            prefill_tps: 1_000_000.0,
+            ..mock_worker::sim::SimParams::default()
+        },
+    });
+    tokio::spawn(mock_worker::grpc::serve(
+        cfg,
+        "127.0.0.1".to_string(),
+        worker_port,
+    ));
+
+    // 2. Index service over the wire.
+    let index_port = portpicker::pick_unused_port().expect("port for index");
+    let engine = Arc::new(Engine::new(EngineConfig::default()));
+    let addr = format!("127.0.0.1:{index_port}").parse().unwrap();
+    tokio::spawn(server::serve(
+        Arc::clone(&engine),
+        addr,
+        Vec::new(),
+        Duration::from_secs(60),
+    ));
+
+    // 3. Bridge: worker events -> index.
+    let worker_url = format!("grpc://127.0.0.1:{worker_port}");
+    let index_url = format!("http://127.0.0.1:{index_port}");
+    let (tx, rx) = mpsc::channel::<proto::Update>(1024);
+    tokio::spawn(bridge::worker_loop(
+        worker_url.clone(),
+        MODEL.to_string(),
+        BLOCK,
+        tx,
+    ));
+    tokio::spawn(bridge::run_publisher(rx, index_url.clone()));
+
+    // 4. Drive one generate on the worker (8 tokens = 2 blocks) and wait
+    //    for its stream to finish (prefill published at first chunk).
+    let input_ids: Vec<u32> = vec![10, 20, 30, 40, 50, 60, 70, 80];
+    let client = {
+        let mut attempt = 0;
+        loop {
+            match TokenSpeedSchedulerClient::connect(&worker_url).await {
+                Ok(client) => break client,
+                Err(_) if attempt < 50 => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("worker never came up: {error}"),
+            }
+        }
+    };
+    let mut stream = client
+        .generate(ts::GenerateRequest {
+            request_id: "smoke-1".into(),
+            tokenized: Some(ts::TokenizedInput {
+                input_ids: input_ids.clone(),
+                original_text: String::new(),
+            }),
+            sampling_params: Some(ts::SamplingParams {
+                max_new_tokens: Some(4),
+                ..Default::default()
+            }),
+            stream: true,
+            ..Default::default()
+        })
+        .await
+        .expect("generate");
+    while let Some(item) = stream.next().await {
+        item.expect("generate stream item");
+    }
+
+    // 5. Query over the wire until the holder shows up (event propagation
+    //    is async end to end).
+    let mut index = RadixIndexClient::connect(index_url).await.expect("index");
+    let hashes: Vec<u64> = compute_request_content_hashes(&input_ids, BLOCK as usize)
+        .into_iter()
+        .map(|h| h.0)
+        .collect();
+    let (query_tx, query_rx) = mpsc::channel::<proto::Query>(8);
+    let outbound = tokio_stream::wrappers::ReceiverStream::new(query_rx);
+    let mut answers = index
+        .subscribe(tonic::Request::new(outbound))
+        .await
+        .expect("subscribe")
+        .into_inner();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut best: Option<proto::HolderScore> = None;
+    let mut query_id = 0u64;
+    while tokio::time::Instant::now() < deadline {
+        query_id += 1;
+        query_tx
+            .send(proto::Query {
+                query_id,
+                keyspace: Some(bridge::keyspace(MODEL, BLOCK)),
+                content_hashes: hashes.clone(),
+            })
+            .await
+            .expect("send query");
+        let answer = answers
+            .next()
+            .await
+            .expect("answer stream open")
+            .expect("answer ok");
+        assert_eq!(answer.query_id, query_id, "answers correlate by id");
+        if let Some(top) = answer.scores.first() {
+            best = Some(top.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let best = best.expect("the worker's blocks never reached the index");
+    assert_eq!(best.holder, worker_url);
+    assert_eq!(best.matched_blocks, 2, "both prompt blocks must match");
+    assert!(best.event_fed, "bridge traffic is the event feed");
+}

@@ -6033,6 +6033,8 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "kv-index",
+ "mock-worker",
+ "portpicker",
  "prost",
  "rand 0.10.2",
  "rustc-hash 2.1.3",
