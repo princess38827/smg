@@ -36,6 +36,18 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 /// Seed for XXH3 hashing.
 pub const XXH3_SEED: u64 = 1337;
 
+/// Rolling prefix hash over content hashes: `XXH3(prev || current)`, the
+/// same chaining `PositionalIndexer` computes internally. Exported so
+/// out-of-process publishers (the radix index service's placement feed)
+/// can synthesize byte-identical position chains for identical prefixes.
+#[inline]
+pub fn chain_prefix_hash(prev: SequenceHash, current: ContentHash) -> SequenceHash {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&prev.0.to_le_bytes());
+    bytes[8..].copy_from_slice(&current.0.to_le_bytes());
+    SequenceHash(xxhash_rust::xxh3::xxh3_64_with_seed(&bytes, XXH3_SEED))
+}
+
 /// Shard count for the main index DashMap.
 /// Tuned iteratively — higher values reduce per-shard contention under concurrent
 /// reads+writes at the cost of more memory for shard locks.

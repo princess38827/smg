@@ -1,0 +1,41 @@
+[package]
+name = "radix-index"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Generic radix membership index service: block-quantized prefix chains, per-holder overlap scoring, pub in / sub out"
+
+[lib]
+name = "radix_index"
+path = "src/lib.rs"
+
+[[bin]]
+name = "radix-index-service"
+path = "src/bin/service.rs"
+
+[[bin]]
+name = "radix-index-bridge"
+path = "src/bin/bridge.rs"
+
+[[bin]]
+name = "radix-index-bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+kv-index = { path = "../kv_index" }
+smg-grpc-client = { path = "../grpc_client" }
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = "0.1"
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true }
+rustc-hash = "2"
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
