@@ -38,6 +38,10 @@ async fn main() {
         default_capacity_blocks: parse_flag(&args, "--default-capacity-blocks").unwrap_or(u64::MAX),
     };
     let sweep = Duration::from_secs(parse_flag(&args, "--sweep-interval-secs").unwrap_or(5));
+    let delay_stored =
+        Duration::from_millis(parse_flag(&args, "--apply-delay-stored-ms").unwrap_or(0));
+    let delay_removed =
+        Duration::from_millis(parse_flag(&args, "--apply-delay-removed-ms").unwrap_or(0));
 
     let engine = Arc::new(Engine::new(cfg));
     if let Some(peer) = bootstrap {
@@ -49,7 +53,9 @@ async fn main() {
 
     let addr = format!("127.0.0.1:{port}").parse().expect("bind addr");
     tracing::info!(%addr, peers = peers.len(), "radix index serving");
-    if let Err(error) = server::serve(engine, addr, peers, sweep).await {
+    if let Err(error) =
+        server::serve_with_delays(engine, addr, peers, sweep, delay_stored, delay_removed).await
+    {
         tracing::error!(%error, "server exited");
     }
 }

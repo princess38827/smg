@@ -32,6 +32,10 @@ const RELAY_QUEUE: usize = 65_536;
 pub struct IndexService {
     engine: Arc<Engine>,
     relay: Vec<mpsc::Sender<proto::Update>>,
+    /// Staleness injection for the experiment's sweep: delay applied
+    /// before Stored / Removed events land in the engine. Zero = off.
+    delay_stored: Duration,
+    delay_removed: Duration,
 }
 
 impl IndexService {
@@ -40,8 +44,37 @@ impl IndexService {
     /// Relay is async and best-effort: a wedged peer drops updates, and
     /// epoch/seq dedup plus TTL/re-placement bound the divergence.
     pub fn new(engine: Arc<Engine>, peers: Vec<String>) -> Self {
+        Self::with_delays(engine, peers, Duration::ZERO, Duration::ZERO)
+    }
+
+    pub fn with_delays(
+        engine: Arc<Engine>,
+        peers: Vec<String>,
+        delay_stored: Duration,
+        delay_removed: Duration,
+    ) -> Self {
         let relay = peers.into_iter().map(spawn_relay).collect();
-        Self { engine, relay }
+        Self {
+            engine,
+            relay,
+            delay_stored,
+            delay_removed,
+        }
+    }
+
+    /// Injected apply delay for one update: the max over its event kinds
+    /// (Stored covers placements too; a mixed batch takes the larger
+    /// delay so its internal order is preserved).
+    fn apply_delay(&self, update: &proto::Update) -> Duration {
+        let mut delay = Duration::ZERO;
+        for event in &update.events {
+            match event.kind.as_ref() {
+                Some(proto::event::Kind::Stored(_)) => delay = delay.max(self.delay_stored),
+                Some(proto::event::Kind::Removed(_)) => delay = delay.max(self.delay_removed),
+                _ => {}
+            }
+        }
+        delay
     }
 }
 
@@ -111,13 +144,24 @@ impl RadixIndex for IndexService {
         let mut inbound = request.into_inner();
         let engine = Arc::clone(&self.engine);
         let relay = self.relay.clone();
+        let delays = (self.delay_stored, self.delay_removed);
         let (tx, rx) = mpsc::channel::<Result<proto::PublishAck, Status>>(1024);
+        // Staleness injection is a constant LAG, not per-update service
+        // time: updates flow through an unbounded FIFO stamped with an
+        // apply deadline, and a drainer applies each at its deadline —
+        // per-stream order (and so per-holder seq order) is preserved,
+        // and throughput is unaffected. Zero-delay legs skip the queue.
+        let (delayed_tx, mut delayed_rx) =
+            mpsc::unbounded_channel::<(tokio::time::Instant, proto::Update)>();
+        let apply_engine = Arc::clone(&engine);
+        let apply_relay = relay.clone();
+        let ack_tx = tx.clone();
         tokio::spawn(async move {
-            while let Some(update) = inbound.next().await {
-                let Ok(update) = update else { break };
+            while let Some((deadline, update)) = delayed_rx.recv().await {
+                tokio::time::sleep_until(deadline).await;
                 let msg = UpdateMsg::from(&update);
-                let (_outcome, applied_seq) = engine.apply(&msg);
-                for peer in &relay {
+                let (_outcome, applied_seq) = apply_engine.apply(&msg);
+                for peer in &apply_relay {
                     let _ = peer.try_send(update.clone());
                 }
                 let ack = proto::PublishAck {
@@ -125,11 +169,29 @@ impl RadixIndex for IndexService {
                     epoch: msg.epoch,
                     applied_seq,
                 };
-                if tx.send(Ok(ack)).await.is_err() {
+                if ack_tx.send(Ok(ack)).await.is_err() {
                     break;
                 }
             }
         });
+        tokio::spawn(async move {
+            while let Some(update) = inbound.next().await {
+                let Ok(update) = update else { break };
+                let mut delay = Duration::ZERO;
+                for event in &update.events {
+                    match event.kind.as_ref() {
+                        Some(proto::event::Kind::Stored(_)) => delay = delay.max(delays.0),
+                        Some(proto::event::Kind::Removed(_)) => delay = delay.max(delays.1),
+                        _ => {}
+                    }
+                }
+                let deadline = tokio::time::Instant::now() + delay;
+                if delayed_tx.send((deadline, update)).is_err() {
+                    break;
+                }
+            }
+        });
+        drop(tx);
         Ok(Response::new(Box::pin(
             tokio_stream::wrappers::ReceiverStream::new(rx),
         )))
@@ -231,6 +293,26 @@ pub async fn serve(
     peers: Vec<String>,
     sweep_interval: Duration,
 ) -> Result<(), tonic::transport::Error> {
+    serve_with_delays(
+        engine,
+        addr,
+        peers,
+        sweep_interval,
+        Duration::ZERO,
+        Duration::ZERO,
+    )
+    .await
+}
+
+/// [`serve`] with staleness injection (the experiment's sweep knob).
+pub async fn serve_with_delays(
+    engine: Arc<Engine>,
+    addr: std::net::SocketAddr,
+    peers: Vec<String>,
+    sweep_interval: Duration,
+    delay_stored: Duration,
+    delay_removed: Duration,
+) -> Result<(), tonic::transport::Error> {
     let sweeper = Arc::clone(&engine);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(sweep_interval);
@@ -240,7 +322,12 @@ pub async fn serve(
         }
     });
     Server::builder()
-        .add_service(RadixIndexServer::new(IndexService::new(engine, peers)))
+        .add_service(RadixIndexServer::new(IndexService::with_delays(
+            engine,
+            peers,
+            delay_stored,
+            delay_removed,
+        )))
         .serve(addr)
         .await
 }
