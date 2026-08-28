@@ -1421,15 +1421,20 @@ impl CacheAwarePolicy {
                 avg_load,
                 info,
             )?;
+            // "Cache-aware selection" + branch= is the harness's parse
+            // contract (branch_counts in scripts/generate_sim/sim.py);
+            // event-driven decisions must land in the same breakdown as
+            // the tree/hash modes.
             debug!(
-                worker = workers[idx].url(),
+                index = "event",
                 branch = if affinity_candidates.contains(&idx) {
                     "event_hit"
                 } else {
                     "event_spill"
                 },
+                worker = workers[idx].url(),
                 model_id,
-                "Event-driven routing: overlap match"
+                "Cache-aware selection"
             );
             return Some(idx);
         }
@@ -1437,8 +1442,11 @@ impl CacheAwarePolicy {
         // No cache overlap — expected-wait fallback over the healthy fleet.
         let selected = self.select_expected_wait(workers, healthy_indices, info)?;
         debug!(
+            index = "event",
+            branch = "event_miss",
             worker = workers[selected].url(),
-            model_id, "Event-driven routing: no overlap, expected-wait fallback"
+            model_id,
+            "Cache-aware selection"
         );
         Some(selected)
     }
