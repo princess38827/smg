@@ -160,3 +160,64 @@ async fn worker_events_reach_the_index_over_the_wire() {
     assert_eq!(best.matched_blocks, 2, "both prompt blocks must match");
     assert!(best.event_fed, "bridge traffic is the event feed");
 }
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixture: fire-and-forget servers for the test's lifetime"
+)]
+#[tokio::test]
+async fn client_placements_and_queries_roundtrip() {
+    use radix_index::client::{QueryOutcome, RemoteIndex};
+
+    let port = portpicker::pick_unused_port().expect("port");
+    let engine = Arc::new(Engine::new(EngineConfig::default()));
+    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+    tokio::spawn(server::serve(
+        engine,
+        addr,
+        Vec::new(),
+        Duration::from_secs(60),
+    ));
+
+    let client = RemoteIndex::connect(format!("http://127.0.0.1:{port}"));
+    let tokens: Vec<u32> = (0..16).collect();
+    let hashes: Vec<u64> = compute_request_content_hashes(&tokens, BLOCK as usize)
+        .into_iter()
+        .map(|h| h.0)
+        .collect();
+
+    // Before any placement: Empty (or Disconnected while dialing).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match client
+            .query(MODEL, BLOCK, hashes.clone(), Duration::from_millis(50))
+            .await
+        {
+            QueryOutcome::Empty => break,
+            QueryOutcome::Scores(scores) => panic!("unexpected scores {scores:?}"),
+            _ if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            outcome => panic!("index never became reachable: {outcome:?}"),
+        }
+    }
+
+    client.publish_placement(MODEL, BLOCK, "grpc://10.0.0.1:9000", &hashes);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match client
+            .query(MODEL, BLOCK, hashes.clone(), Duration::from_millis(50))
+            .await
+        {
+            QueryOutcome::Scores(scores) => {
+                assert_eq!(scores[0].0, "grpc://10.0.0.1:9000");
+                assert_eq!(scores[0].1, 4, "16 tokens at block 4 = 4 blocks");
+                break;
+            }
+            _ if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            outcome => panic!("placement never became queryable: {outcome:?}"),
+        }
+    }
+}

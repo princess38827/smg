@@ -1337,6 +1337,20 @@ impl Metrics {
     }
 
     /// Record worker selection
+    /// One remote radix-index overlap query on the selection path.
+    /// `outcome`: remote_hit | remote_empty | remote_timeout |
+    /// remote_disconnected.
+    pub fn record_remote_index_query(outcome: &'static str, duration: Duration) {
+        counter!("smg_remote_index_query_total", "outcome" => outcome).increment(1);
+        histogram!("smg_remote_index_query_duration_seconds", "outcome" => outcome)
+            .record(duration.as_secs_f64());
+    }
+
+    /// One placement published (fire-and-forget) after successful dispatch.
+    pub fn record_remote_index_publish() {
+        counter!("smg_remote_index_publish_total").increment(1);
+    }
+
     pub fn record_worker_selection(
         worker_type: &'static str,
         connection_mode: &'static str,

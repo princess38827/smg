@@ -46,7 +46,7 @@ use super::{
         },
         streaming,
     },
-    utils,
+    remote_index, utils,
     utils::error_type_from_status,
 };
 use crate::{
@@ -622,7 +622,38 @@ impl RequestPipeline {
                     metrics_labels::ENDPOINT_GENERATE,
                     start.elapsed(),
                 );
-                axum::Json(response).into_response()
+                // Remote-index bookkeeping, after the request actually
+                // completed (selection is not dispatch: shed/retry paths
+                // must not create phantom placements): publish the served
+                // prefix and echo the prediction so the harness can
+                // separate index error from policy spill.
+                let mut http_response = axum::Json(response).into_response();
+                if let Some(prediction) = &ctx.state.index_prediction {
+                    if let (Some(client), Some(WorkerSelection::Single { worker })) =
+                        (remote_index::get(), &ctx.state.workers)
+                    {
+                        client.publish_placement(
+                            &prediction.model,
+                            prediction.block_size as u32,
+                            worker.url(),
+                            &prediction.content_hashes,
+                        );
+                        Metrics::record_remote_index_publish();
+                        let predicted_tokens = prediction
+                            .scores
+                            .iter()
+                            .find(|(url, _)| url == worker.url())
+                            .map_or(0, |(_, blocks)| *blocks as usize * prediction.block_size);
+                        let headers = http_response.headers_mut();
+                        if let Ok(value) = predicted_tokens.to_string().parse() {
+                            headers.insert("x-smg-index-predicted-tokens", value);
+                        }
+                        if let Ok(value) = prediction.source.parse() {
+                            headers.insert("x-smg-index-source", value);
+                        }
+                    }
+                }
+                http_response
             }
             Some(
                 response_type @ (FinalResponse::Chat(_)

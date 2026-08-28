@@ -187,6 +187,10 @@ pub(crate) struct ProcessingState {
 
     // Stage 5: Dispatch metadata
     pub dispatch: Option<DispatchMetadata>,
+    /// Remote radix-index prefetch outcome (selection stage), consumed by
+    /// the placement publish and the response echo headers. `None` unless
+    /// `--kv-indexer-url` is set and the request took the prefetch path.
+    pub index_prediction: Option<super::remote_index::IndexPrediction>,
 
     // Load guard for worker load tracking (created at execution stage)
     pub load_guards: Option<LoadGuards>,

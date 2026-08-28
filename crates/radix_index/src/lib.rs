@@ -4,6 +4,7 @@
 //! epoch/commutativity argument).
 
 pub mod bridge;
+pub mod client;
 pub mod engine;
 pub mod server;
 

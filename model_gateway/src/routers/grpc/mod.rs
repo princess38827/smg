@@ -15,6 +15,7 @@ pub(crate) mod multimodal;
 pub(crate) mod pipeline;
 pub(crate) mod proto_wrapper;
 pub(crate) mod regular;
+pub(crate) mod remote_index;
 pub(crate) mod router; // Used by routers/factory
 pub mod utils; // Used by routers/http and bindings/golang
 pub mod zmq_client; // ZMQ backend adapter behind the vLLM client surface

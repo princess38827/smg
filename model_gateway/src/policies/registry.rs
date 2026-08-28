@@ -18,7 +18,7 @@ use super::{
     get_healthy_worker_indices,
     manual::{ExecutionBranch, PinState},
     BucketPolicy, CacheAwarePolicy, DPRankLoadPolicy, LoadBalancingPolicy, ManualConfig,
-    ManualPolicy, PolicyFactory, SelectWorkerInfo, WorkerLeg,
+    ManualPolicy, PolicyFactory, RemoteOverlap, SelectWorkerInfo, WorkerLeg,
 };
 use crate::{
     config::types::{ManualAssignmentMode, PolicyConfig, RoutingKeyOverrideConfig},
@@ -244,6 +244,38 @@ impl PolicyRegistry {
             }
         }
         policy.select_worker(workers, info)
+    }
+
+    /// [`Self::select_worker`] with prefetched remote-index scores: the
+    /// sticky override still wins identically; the scores only reach the
+    /// policy on the delegated path (and only cache_aware consumes them).
+    pub fn select_worker_with_remote(
+        &self,
+        policy: &Arc<dyn LoadBalancingPolicy>,
+        workers: &[Arc<dyn Worker>],
+        info: &SelectWorkerInfo,
+        remote: Option<&RemoteOverlap>,
+    ) -> Option<usize> {
+        if let Some(sticky) = self.routing_key_sticky.as_ref() {
+            if Self::routing_key_override_applies(policy.name()) {
+                if let Some((key, source)) = self.effective_sticky_key(info) {
+                    return Self::select_sticky(sticky, policy, workers, info, key, source);
+                }
+            }
+        }
+        match remote {
+            Some(remote) if !remote.scores.is_empty() => {
+                policy.select_worker_with_remote(workers, info, remote)
+            }
+            _ => policy.select_worker(workers, info),
+        }
+    }
+
+    /// Whether the sticky routing-key override is configured at all (used
+    /// by the selection stage to skip a wasted remote-index prefetch when
+    /// the override will win anyway).
+    pub fn routing_key_override_enabled(&self) -> bool {
+        self.routing_key_sticky.is_some()
     }
 
     /// Keyed selection: honor an existing pin under the in-flight cap;

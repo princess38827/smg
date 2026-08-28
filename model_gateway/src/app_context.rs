@@ -22,7 +22,7 @@ use crate::{
     rate_limit::RateLimitManager,
     routers::{
         common::{openai_bridge::FormatRegistry, overload, realtime::RealtimeRegistry},
-        grpc::multimodal::MultimodalConfigRegistry,
+        grpc::{multimodal::MultimodalConfigRegistry, remote_index},
         router_manager::RouterManager,
     },
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
@@ -752,6 +752,13 @@ impl AppContextBuilder {
             }
 
             self.kv_event_monitor = Some(monitor);
+        }
+
+        // Remote radix index (experiment flag): one process-global client;
+        // the selection stage and the pipelines consult it directly. Unset
+        // leaves every code path on its exact prior behavior.
+        if let Some(url) = &config.kv_indexer_url {
+            remote_index::init(url, config.kv_indexer_block_size.unwrap_or(128) as usize);
         }
 
         self

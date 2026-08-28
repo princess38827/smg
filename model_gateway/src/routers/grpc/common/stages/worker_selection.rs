@@ -21,7 +21,7 @@ use crate::{
         error,
         grpc::{
             context::{EncodeWorkerAssignment, RequestContext, WorkerSelection},
-            multimodal,
+            multimodal, remote_index,
         },
     },
     worker::{
@@ -107,9 +107,68 @@ impl PipelineStage for WorkerSelectionStage {
         let rid_key = rid_key.as_deref();
 
         let model_id = ctx.input.model_id.as_str();
+
+        // Remote-index prefetch (--kv-indexer-url, Regular mode only):
+        // resolve per-holder overlap scores from the shared radix index
+        // BEFORE the synchronous policy call, under a hard deadline.
+        // Skipped whenever it could not matter: flag off, non-cache_aware
+        // policy, no tokens, or a sticky override key that will win anyway.
+        let mut remote_overlap: Option<crate::policies::RemoteOverlap> = None;
+        if matches!(self.mode, WorkerSelectionMode::Regular) {
+            if let (Some(client), Some(tokens)) = (remote_index::get(), tokens) {
+                let sticky_wins = self.policy_registry.routing_key_override_enabled()
+                    && (rid_key.is_some()
+                        || self.policy_registry.resolve_routing_key(headers).is_some());
+                let policy = self.policy_registry.get_policy_or_default(model_id);
+                if policy.name() == "cache_aware" && !sticky_wins {
+                    let block = remote_index::block_size();
+                    let hashes: Vec<u64> = kv_index::compute_request_content_hashes(tokens, block)
+                        .iter()
+                        .map(|h| h.0)
+                        .collect();
+                    if !hashes.is_empty() {
+                        let started = std::time::Instant::now();
+                        let outcome = client
+                            .query(
+                                model_id,
+                                block as u32,
+                                hashes.clone(),
+                                remote_index::QUERY_DEADLINE,
+                            )
+                            .await;
+                        let label = remote_index::outcome_label(&outcome);
+                        Metrics::record_remote_index_query(label, started.elapsed());
+                        let scores = match outcome {
+                            radix_index::client::QueryOutcome::Scores(scores) => scores,
+                            _ => Vec::new(),
+                        };
+                        remote_overlap = Some(crate::policies::RemoteOverlap {
+                            scores: scores.clone(),
+                            request_blocks: hashes.len(),
+                            block_size: block,
+                        });
+                        ctx.state.index_prediction = Some(remote_index::IndexPrediction {
+                            source: label,
+                            scores,
+                            block_size: block,
+                            content_hashes: hashes,
+                            model: model_id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         let workers = match self.mode {
             WorkerSelectionMode::Regular => {
-                match self.select_single_worker(model_id, text, tokens, headers, rid_key) {
+                match self.select_single_worker(
+                    model_id,
+                    text,
+                    tokens,
+                    headers,
+                    rid_key,
+                    remote_overlap.as_ref(),
+                ) {
                     Some(w) => WorkerSelection::Single { worker: w },
                     None => return Err(self.selection_failure(model_id, &[WorkerType::Regular])),
                 }
@@ -272,6 +331,7 @@ impl WorkerSelectionStage {
         tokens: Option<&[u32]>,
         headers: Option<&HeaderMap>,
         rid_key: Option<&str>,
+        remote_overlap: Option<&crate::policies::RemoteOverlap>,
     ) -> Option<Arc<dyn Worker>> {
         // Get workers for the specified model. The gRPC router serves both gRPC
         // and direct-ZMQ workers, so accept either transport (not HTTP).
@@ -302,7 +362,7 @@ impl WorkerSelectionStage {
 
         // Select worker via the registry (applies the routing-key sticky override
         // when enabled; otherwise delegates to the configured policy).
-        let idx = self.policy_registry.select_worker(
+        let idx = self.policy_registry.select_worker_with_remote(
             &policy,
             available,
             &SelectWorkerInfo {
@@ -314,6 +374,7 @@ impl WorkerSelectionStage {
                 hash_ring,
                 leg: WorkerLeg::Single,
             },
+            remote_overlap,
         )?;
         let selected = available[idx].clone();
 
@@ -1058,7 +1119,7 @@ mod tests {
         let mut poison = HeaderMap::new();
         poison.insert("x-smg-routing-key", "req-unique-1".parse().unwrap());
         let first = stage
-            .select_single_worker(model_id, None, None, Some(&poison), rid_key)
+            .select_single_worker(model_id, None, None, Some(&poison), rid_key, None)
             .unwrap();
         for (i, rid) in ["conv7_t2", "conv7_t2_r1", "conv7_t3"].iter().enumerate() {
             let mut rotated = HeaderMap::new();
@@ -1073,6 +1134,7 @@ mod tests {
                     None,
                     Some(&rotated),
                     policy_registry.derive_rid_key(Some(rid)),
+                    None,
                 )
                 .unwrap();
             assert_eq!(again.url(), first.url(), "follow-up must pin by rid key");
@@ -1110,13 +1172,13 @@ mod tests {
         );
 
         assert!(stage
-            .select_single_worker(model_id, None, None, None, None)
+            .select_single_worker(model_id, None, None, None, None, None)
             .is_some());
 
         worker_registry.set_worker_overloaded(&workers[0], true);
         assert!(
             stage
-                .select_single_worker(model_id, None, None, None, None)
+                .select_single_worker(model_id, None, None, None, None, None)
                 .is_some(),
             "one eligible worker left still serves"
         );
@@ -1124,7 +1186,7 @@ mod tests {
         worker_registry.set_worker_overloaded(&workers[1], true);
         assert!(
             stage
-                .select_single_worker(model_id, None, None, None, None)
+                .select_single_worker(model_id, None, None, None, None, None)
                 .is_none(),
             "the veto empties the candidate pool"
         );
@@ -1140,7 +1202,7 @@ mod tests {
         // genuinely absent model.
         worker_registry.set_worker_overloaded(&workers[0], false);
         assert!(stage
-            .select_single_worker(model_id, None, None, None, None)
+            .select_single_worker(model_id, None, None, None, None, None)
             .is_some());
         assert_eq!(
             stage
