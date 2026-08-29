@@ -37,6 +37,8 @@ Pre-registered endpoints:
   located, not just measured: prediction error mean −640 / p95 −3840
   tokens = prompt-only placement chains under-claim by the output tail
   (matches the output CDF). Future fix: publish prompt⊕output chains.
+  [Landed and revalidated: 0.9398, within 0.25 points — see
+  `../2026-08-29-radix-index-m3-placement/`.]
 - **Mesh TreeSync ties on accuracy** (0.9425) — the honest result the
   gap-scan demanded. The service's case is therefore: balance (CoV
   0.05–0.09 vs 0.57–0.60, ~10×), memory (state held once vs once per

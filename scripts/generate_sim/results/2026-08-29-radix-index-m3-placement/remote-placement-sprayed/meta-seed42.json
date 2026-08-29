@@ -1,0 +1,38 @@
+{
+  "smg_bin": "smg",
+  "started_at": "2026-08-29T00:55:42.254535",
+  "git_commit": "9671022ab5cfc1491e0230c63d35f994e39a9b10",
+  "git_dirty": false,
+  "binary_sha256": {
+    "smg": "cbc23f3e1d6c93c94cfff9c892f6160be7959314817e902858b7f182383d972b",
+    "mock-worker": "ea99ecb7f93b5dc1eafb5076a6d94916be9c1cc6d2690dd4b6f1137d11455f35",
+    "sim-loadgen": "078a262c3e21f0296ad2a62a508e7099a4df5d4d4959a42d336c58a403df217b",
+    "radix-index-service": "5b5ca43db90ad555a2baa6684686e4b861e30c2aff6ba87717ebf77e02f5b702",
+    "radix-index-bridge": "0b253d7d7240897022139c1d2928345de2f191ce0e56748afdd7620e1f70de6f"
+  },
+  "profile_sha256": "492653047da8d7a57b888762af62605e2c616f864aa24d9aa64e1a882b52fbcd",
+  "loadgen_seed": 42,
+  "host": "macOS-26.3-arm64-arm-64bit-Mach-O",
+  "registered": {
+    "30000": 120,
+    "30001": 120,
+    "30002": 120,
+    "30003": 120,
+    "30004": 120,
+    "30005": 120,
+    "30006": 120,
+    "30007": 120
+  },
+  "ready": {
+    "30000": 120,
+    "30001": 120,
+    "30002": 120,
+    "30003": 120,
+    "30004": 120,
+    "30005": 120,
+    "30006": 120,
+    "30007": 120
+  },
+  "loadgen_exit": 0,
+  "finished_at": "2026-08-29T00:59:29.138019"
+}

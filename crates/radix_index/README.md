@@ -4,9 +4,11 @@ A shared radix membership index for cache-aware routing: gateways ask
 "which worker already holds the longest prefix of this request?" without
 each gateway building and syncing its own tree.
 
-The data structure is [`radix-core`](../radix_core)'s block-quantized
-positional index. This crate wraps it in a keyspace-partitioned engine,
-a gRPC surface, and the client/bridge pieces that feed and query it.
+The data structure is SMG `kv_index`'s block-quantized positional
+index (a direct import — whether the service should instead get a
+ground-up generic radix tree is an open evaluation). This crate wraps
+it in a keyspace-partitioned engine, a gRPC surface, and the
+client/bridge pieces that feed and query it.
 
 ## Interface: two verbs
 
