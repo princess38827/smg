@@ -435,6 +435,39 @@ impl Engine {
         let spaces = self.keyspaces.lock().unwrap_or_else(|p| p.into_inner());
         spaces.values().map(|s| s.indexer.entry_count()).sum()
     }
+
+    /// Point-in-time gauges for the metrics endpoint. One pass under the
+    /// engine lock; cheap relative to apply/query traffic.
+    pub fn stats(&self) -> EngineStats {
+        let spaces = self.keyspaces.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stats = EngineStats {
+            keyspaces: spaces.len(),
+            ..EngineStats::default()
+        };
+        for space in spaces.values() {
+            stats.blocks += space.indexer.entry_count();
+            for holder in space.holders.values() {
+                stats.holders += 1;
+                if holder.event_fed {
+                    stats.event_fed_holders += 1;
+                }
+                if holder.dropped {
+                    stats.dropped_holders += 1;
+                }
+            }
+        }
+        stats
+    }
+}
+
+/// Point-in-time engine gauges (see [`Engine::stats`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EngineStats {
+    pub keyspaces: usize,
+    pub holders: usize,
+    pub event_fed_holders: usize,
+    pub dropped_holders: usize,
+    pub blocks: usize,
 }
 
 /// Deterministic placement chain: content hashes -> position-chained
