@@ -98,21 +98,6 @@ impl IndexService {
             delay_removed,
         }
     }
-
-    /// Injected apply delay for one update: the max over its event kinds
-    /// (Stored covers placements too; a mixed batch takes the larger
-    /// delay so its internal order is preserved).
-    fn apply_delay(&self, update: &proto::Update) -> Duration {
-        let mut delay = Duration::ZERO;
-        for event in &update.events {
-            match event.kind.as_ref() {
-                Some(proto::event::Kind::Stored(_)) => delay = delay.max(self.delay_stored),
-                Some(proto::event::Kind::Removed(_)) => delay = delay.max(self.delay_removed),
-                _ => {}
-            }
-        }
-        delay
-    }
 }
 
 /// One background relay: queue -> (re)connected Publish stream to `peer`.
@@ -326,10 +311,6 @@ pub async fn bootstrap_from(engine: &Engine, peer: &str) -> Result<usize, tonic:
 }
 
 /// Serve the index on `addr` until the process exits.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "service-lifetime sweeper; the index process is its own supervisor"
-)]
 pub async fn serve(
     engine: Arc<Engine>,
     addr: std::net::SocketAddr,
