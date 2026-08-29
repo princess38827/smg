@@ -1,36 +1,49 @@
-//! Remote radix index access (`--kv-indexer-url`), experiment-scoped:
-//! process-global handle set once at startup; M3 plumbs it through
-//! AppContext properly. With the flag unset nothing here runs and every
-//! caller's fast path is a `None` check.
+//! Remote radix index access (`--kv-indexer-url`): a per-process client
+//! handle carried on `AppContext` and threaded into the gRPC pipelines.
+//! With the flag unset the handle is `None` and every caller's fast path
+//! is a `None` check.
 
-use std::{
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use radix_index::client::{QueryOutcome, RemoteIndex};
-
-static REMOTE: OnceLock<Arc<RemoteIndex>> = OnceLock::new();
-static BLOCK: OnceLock<usize> = OnceLock::new();
 
 /// Hard deadline for the routing-time overlap query; a miss falls back
 /// to expected-wait for that one decision.
 pub(crate) const QUERY_DEADLINE: Duration = Duration::from_millis(2);
 
-/// Idempotent: the first URL wins (one client per process). `block_size`
-/// is the KEYSPACE block size — the engine-side page size the index was
-/// fed at (worker events / bridge `--block-size`), not the routing block.
-pub(crate) fn init(url: &str, block_size: usize) {
-    let _ = BLOCK.set(block_size.max(1));
-    let _ = REMOTE.set(RemoteIndex::connect(url.to_string()));
+/// The connected remote-index client plus the keyspace block size it was
+/// configured for. One per process, owned by `AppContext`.
+pub struct RemoteIndexHandle {
+    client: Arc<RemoteIndex>,
+    block_size: usize,
 }
 
-pub(crate) fn block_size() -> usize {
-    BLOCK.get().copied().unwrap_or(128)
+impl RemoteIndexHandle {
+    /// `block_size` is the KEYSPACE block size — the engine-side page
+    /// size the index was fed at (worker events / bridge `--block-size`),
+    /// not the routing block.
+    pub fn connect(url: &str, block_size: usize) -> Arc<Self> {
+        Arc::new(Self {
+            client: RemoteIndex::connect(url.to_string()),
+            block_size: block_size.max(1),
+        })
+    }
+
+    pub(crate) fn client(&self) -> &RemoteIndex {
+        &self.client
+    }
+
+    pub(crate) fn block_size(&self) -> usize {
+        self.block_size
+    }
 }
 
-pub(crate) fn get() -> Option<&'static Arc<RemoteIndex>> {
-    REMOTE.get()
+impl std::fmt::Debug for RemoteIndexHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteIndexHandle")
+            .field("block_size", &self.block_size)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the selection-stage prefetch resolved, kept on the request

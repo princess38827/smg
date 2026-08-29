@@ -87,11 +87,18 @@ pub(crate) struct PipelineDeps {
     /// `None` when tenant rate limiting is disabled; read only by the
     /// endpoints that insert `RateLimitReserveStage` (chat/messages/completion/harmony).
     rate_limit_manager: Option<Arc<RateLimitManager>>,
+    /// Remote radix index (`--kv-indexer-url`); consulted by the
+    /// selection stage's prefetch and the generate placement publish.
+    remote_index: Option<Arc<remote_index::RemoteIndexHandle>>,
 }
 
 impl PipelineDeps {
     /// Full deps for the chat/messages/harmony endpoints, which consume the
     /// configured parser factories/overrides.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor mirrors the struct's fields one-to-one"
+    )]
     pub(crate) fn new(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
@@ -100,6 +107,7 @@ impl PipelineDeps {
         configured_tool_parser: Option<String>,
         configured_reasoning_parser: Option<String>,
         rate_limit_manager: Option<Arc<RateLimitManager>>,
+        remote_index: Option<Arc<remote_index::RemoteIndexHandle>>,
     ) -> Self {
         Self {
             worker_registry,
@@ -109,6 +117,7 @@ impl PipelineDeps {
             configured_tool_parser,
             configured_reasoning_parser,
             rate_limit_manager,
+            remote_index,
         }
     }
 
@@ -118,6 +127,7 @@ impl PipelineDeps {
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
         rate_limit_manager: Option<Arc<RateLimitManager>>,
+        remote_index: Option<Arc<remote_index::RemoteIndexHandle>>,
     ) -> Self {
         Self {
             worker_registry,
@@ -127,6 +137,7 @@ impl PipelineDeps {
             configured_tool_parser: None,
             configured_reasoning_parser: None,
             rate_limit_manager,
+            remote_index,
         }
     }
 
@@ -191,6 +202,7 @@ impl PipelineDeps {
             configured_tool_parser: None,
             configured_reasoning_parser: None,
             rate_limit_manager: None,
+            remote_index: None,
         }
     }
 }
@@ -204,6 +216,8 @@ pub(crate) struct RequestPipeline {
     stages: Arc<Vec<Box<dyn PipelineStage>>>,
     /// Backend type for metrics labeling
     backend_type: &'static str,
+    /// Remote radix index handle for the generate placement publish.
+    remote_index: Option<Arc<remote_index::RemoteIndexHandle>>,
 }
 
 impl RequestPipeline {
@@ -296,6 +310,7 @@ impl RequestPipeline {
                         deps.worker_registry.clone(),
                         deps.policy_registry.clone(),
                         worker_selection,
+                        deps.remote_index.clone(),
                     )),
                     Box::new(ClientAcquisitionStage),
                 ];
@@ -325,6 +340,7 @@ impl RequestPipeline {
                         deps.worker_registry.clone(),
                         deps.policy_registry.clone(),
                         worker_selection,
+                        deps.remote_index.clone(),
                     )),
                     Box::new(ClientAcquisitionStage),
                 ];
@@ -355,6 +371,7 @@ impl RequestPipeline {
                         deps.worker_registry.clone(),
                         deps.policy_registry.clone(),
                         worker_selection,
+                        deps.remote_index.clone(),
                     )),
                     Box::new(ClientAcquisitionStage),
                 ];
@@ -387,6 +404,7 @@ impl RequestPipeline {
                         deps.worker_registry.clone(),
                         deps.policy_registry.clone(),
                         worker_selection,
+                        deps.remote_index.clone(),
                     )),
                     Box::new(ClientAcquisitionStage),
                     Box::new(harmony::stages::HarmonyRequestBuildingStage::new(
@@ -409,6 +427,7 @@ impl RequestPipeline {
                         deps.worker_registry.clone(),
                         deps.policy_registry.clone(),
                         worker_selection,
+                        deps.remote_index.clone(),
                     )),
                     Box::new(ClientAcquisitionStage),
                     Box::new(EmbeddingRequestBuildingStage::new()),
@@ -428,6 +447,7 @@ impl RequestPipeline {
                         deps.worker_registry.clone(),
                         deps.policy_registry.clone(),
                         worker_selection,
+                        deps.remote_index.clone(),
                     )),
                     Box::new(ClientAcquisitionStage),
                     Box::new(EmbeddingRequestBuildingStage::new()),
@@ -441,6 +461,7 @@ impl RequestPipeline {
         Some(Self {
             stages: Arc::new(stages),
             backend_type: backend,
+            remote_index: deps.remote_index.clone(),
         })
     }
 
@@ -649,10 +670,10 @@ impl RequestPipeline {
                     });
                 let mut http_response = axum::Json(response).into_response();
                 if let Some(prediction) = &ctx.state.index_prediction {
-                    if let (Some(client), Some(WorkerSelection::Single { worker })) =
-                        (remote_index::get(), &ctx.state.workers)
+                    if let (Some(handle), Some(WorkerSelection::Single { worker })) =
+                        (self.remote_index.as_ref(), &ctx.state.workers)
                     {
-                        client.publish_placement(
+                        handle.client().publish_placement(
                             &prediction.model,
                             prediction.block_size as u32,
                             worker.url(),
@@ -1618,7 +1639,7 @@ mod alias_pipeline_tests {
             .unwrap();
 
         let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
-        let deps = PipelineDeps::pair(worker_registry.clone(), policy_registry, None);
+        let deps = PipelineDeps::pair(worker_registry.clone(), policy_registry, None, None);
         let pipeline = RequestPipeline::build(Endpoint::Chat, Mode::PrefillDecode, &deps).unwrap();
         let components = Arc::new(SharedComponents {
             tokenizer_registry,
