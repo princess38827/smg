@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -46,6 +46,10 @@ pub struct RemoteIndex {
     queries: mpsc::Sender<PendingQuery>,
     placements: mpsc::Sender<proto::Update>,
     next_id: AtomicU64,
+    /// Flipped by the subscribe driver on stream up/down. While false, a
+    /// query resolves Disconnected immediately instead of burning its
+    /// deadline on a stream that cannot answer.
+    connected: Arc<AtomicBool>,
 }
 
 impl RemoteIndex {
@@ -57,13 +61,24 @@ impl RemoteIndex {
     pub fn connect(url: String) -> Arc<Self> {
         let (query_tx, query_rx) = mpsc::channel::<PendingQuery>(4096);
         let (placement_tx, placement_rx) = mpsc::channel::<proto::Update>(65_536);
-        tokio::spawn(subscribe_driver(url.clone(), query_rx));
+        let connected = Arc::new(AtomicBool::new(false));
+        tokio::spawn(subscribe_driver(
+            url.clone(),
+            query_rx,
+            Arc::clone(&connected),
+        ));
         tokio::spawn(bridge::run_publisher(placement_rx, url));
         Arc::new(Self {
             queries: query_tx,
             placements: placement_tx,
             next_id: AtomicU64::new(1),
+            connected,
         })
+    }
+
+    /// Whether the subscribe stream is currently established.
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// Overlap query with a hard deadline. Never blocks longer than
@@ -75,6 +90,9 @@ impl RemoteIndex {
         content_hashes: Vec<u64>,
         deadline: Duration,
     ) -> QueryOutcome {
+        if !self.is_connected() {
+            return QueryOutcome::Disconnected;
+        }
         let query_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = oneshot::channel();
         let pending = PendingQuery {
@@ -149,7 +167,11 @@ impl RemoteIndex {
 /// forever. On disconnect all pending replies drop (callers resolve
 /// Disconnected); late answers for abandoned ids are discarded by the
 /// map lookup.
-async fn subscribe_driver(url: String, mut queries: mpsc::Receiver<PendingQuery>) {
+async fn subscribe_driver(
+    url: String,
+    mut queries: mpsc::Receiver<PendingQuery>,
+    connected: Arc<AtomicBool>,
+) {
     loop {
         let Ok(mut client) = RadixIndexClient::connect(url.clone()).await else {
             drain_disconnected(&mut queries);
@@ -166,6 +188,7 @@ async fn subscribe_driver(url: String, mut queries: mpsc::Receiver<PendingQuery>
                 continue;
             }
         };
+        connected.store(true, Ordering::Relaxed);
         let mut pending: HashMap<u64, oneshot::Sender<proto::Match>> = HashMap::new();
         loop {
             tokio::select! {
@@ -189,7 +212,9 @@ async fn subscribe_driver(url: String, mut queries: mpsc::Receiver<PendingQuery>
                 },
             }
         }
-        // Pending replies drop here -> callers resolve Disconnected.
+        // Pending replies drop here -> callers resolve Disconnected;
+        // new queries fast-fail on the flag until the stream is back.
+        connected.store(false, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }

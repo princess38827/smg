@@ -624,9 +624,29 @@ impl RequestPipeline {
                 );
                 // Remote-index bookkeeping, after the request actually
                 // completed (selection is not dispatch: shed/retry paths
-                // must not create phantom placements): publish the served
-                // prefix and echo the prediction so the harness can
-                // separate index error from policy spill.
+                // must not create phantom placements): publish what the
+                // worker now holds — its KV blocks span the prompt AND
+                // the generated tail, so the placement chain is
+                // prompt ⊕ output, not the routing-time query prefix —
+                // and echo the prediction so the harness can separate
+                // index error from policy spill.
+                let placement_chain: Option<Vec<u64>> =
+                    ctx.state.index_prediction.as_ref().map(|prediction| {
+                        match (&ctx.state.preparation, response.first()) {
+                            (Some(prep), Some(first)) => {
+                                let mut tokens = prep.token_ids().to_vec();
+                                tokens.extend_from_slice(&first.output_ids);
+                                kv_index::compute_request_content_hashes(
+                                    &tokens,
+                                    prediction.block_size,
+                                )
+                                .iter()
+                                .map(|h| h.0)
+                                .collect()
+                            }
+                            _ => prediction.content_hashes.clone(),
+                        }
+                    });
                 let mut http_response = axum::Json(response).into_response();
                 if let Some(prediction) = &ctx.state.index_prediction {
                     if let (Some(client), Some(WorkerSelection::Single { worker })) =
@@ -636,7 +656,9 @@ impl RequestPipeline {
                             &prediction.model,
                             prediction.block_size as u32,
                             worker.url(),
-                            &prediction.content_hashes,
+                            placement_chain
+                                .as_deref()
+                                .unwrap_or(&prediction.content_hashes),
                         );
                         Metrics::record_remote_index_publish();
                         let predicted_tokens = prediction

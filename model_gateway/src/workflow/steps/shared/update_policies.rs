@@ -9,6 +9,7 @@ use wfaas::{
 };
 
 use crate::{
+    routers::grpc::remote_index,
     worker::{ConnectionMode, Worker},
     workflow::data::WorkerRegistrationData,
 };
@@ -158,7 +159,7 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
             // REPLACES per-gateway indexing (that duplication is the memory
             // cost the remote index exists to remove, and a warm local
             // index would silently absorb remote misses).
-            if cache_aware && crate::routers::grpc::remote_index::get().is_none() {
+            if cache_aware && remote_index::get().is_none() {
                 if let Some(ref monitor) = app_context.kv_event_monitor {
                     if *worker.connection_mode() == ConnectionMode::Grpc {
                         monitor.on_worker_added(worker).await;
